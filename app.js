@@ -122,6 +122,13 @@ function hideModal(modalId) {
         selectedFile = null;
         document.querySelector('.file-label').classList.remove('has-file');
         document.getElementById('fileInput').value = '';
+    } else if (modalId === 'viewModal') {
+        const media = document.querySelector('#viewContent video, #viewContent audio');
+        if (media) {
+            media.pause();
+            media.currentTime = 0;
+        }
+        document.getElementById('viewContent').innerHTML = '';
     }
 }
 
