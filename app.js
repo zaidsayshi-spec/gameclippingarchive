@@ -331,45 +331,68 @@ async function handleUpload(e) {
     });
   
     try {
-        // Upload file to Supabase Storage with real progress
+        // Generate file name
         const fileExt = selectedFile.name.split('.').pop();
         const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${fileExt}`;
-        const uploadUrl = `${SUPABASE_URL}/storage/v1/object/files/${fileName}`;
       
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', uploadUrl);
-        xhr.setRequestHeader('Authorization', `Bearer ${SUPABASE_ANON_KEY}`);
-        xhr.setRequestHeader('Content-Type', selectedFile.type || 'application/octet-stream');
-      
-        xhr.upload.onprogress = (event) => {
-            if (event.lengthComputable) {
-                const percent = (event.loaded / event.total) * 100;
-                progressFill.style.width = `${percent}%`;
-                progressText.textContent = `[UPLOADING...] ${Math.floor(percent)}%`;
-            }
-        };
-      
-        const uploadPromise = new Promise((resolve, reject) => {
-            xhr.onload = () => {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    resolve();
-                } else {
-                    reject(new Error(`Upload failed with status ${xhr.status}`));
-                }
-            };
-            xhr.onerror = () => reject(new Error('Upload error'));
-            xhr.send(selectedFile);
+        // Create resumable upload session
+        const res = await fetch(`${SUPABASE_URL}/storage/v1/upload/resumable`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                bucket_id: 'files',
+                path: fileName,
+                upsert: false,
+            }),
         });
       
-        await uploadPromise;
+        if (!res.ok) {
+            throw new Error(`Failed to create resumable session: ${res.statusText}`);
+        }
+      
+        const { session } = await res.json();
+        if (!session) {
+            throw new Error('No session URL received');
+        }
+      
+        // Use tus for resumable upload
+        const upload = new tus.Upload(selectedFile, {
+            endpoint: session,
+            chunkSize: 50 * 1024 * 1024, // 50MB chunks for faster upload on good connections
+            retryDelays: [0, 1000, 3000, 5000],
+            metadata: {
+                filename: selectedFile.name,
+                contentType: selectedFile.type || 'application/octet-stream',
+            },
+            onError: function (error) {
+                throw error;
+            },
+            onProgress: function (bytesUploaded, bytesTotal) {
+                const percent = (bytesUploaded / bytesTotal) * 90; // Up to 90% for upload
+                progressFill.style.width = `${percent}%`;
+                progressText.textContent = `[UPLOADING...] ${Math.floor(percent)}%`;
+            },
+            onSuccess: function () {
+                // Success handled below
+            }
+        });
+      
+        await new Promise((resolve, reject) => {
+            upload.options.onSuccess = resolve;
+            upload.options.onError = reject;
+            upload.start();
+        });
+      
+        progressFill.style.width = '95%';
+        progressText.textContent = '[UPLOADING...] 95%';
       
         // Get public URL
         const { data: urlData } = supabase.storage
             .from('files')
             .getPublicUrl(fileName);
-      
-        progressFill.style.width = '95%';
-        progressText.textContent = '[UPLOADING...] 95%';
       
         // Create database entry
         const { error: dbError } = await supabase
