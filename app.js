@@ -560,8 +560,8 @@ function getFileIcon(type) {
     switch(type) {
         case 'video': return '[VID]';
         case 'audio': return '[AUDIO]';
-        case 'image': return '[IMG]';
-        case 'document': return '[DOC]';
+        case 'image': return '[IMAGES]';
+        case 'document': return '[DOCUMENTS]';
         default: return '[FILE]';
     }
 }
@@ -570,8 +570,8 @@ function getTypeLabel(type) {
     const labels = {
         'video': '[VID]',
         'audio': '[AUDIO]',
-        'image': '[IMG]',
-        'document': '[DOC]',
+        'image': '[IMAGES]',
+        'document': '[DOCUMENTS]',
         'other': '[FILE]'
     };
     return labels[type] || '[FILE]';
