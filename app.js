@@ -3,48 +3,23 @@ const SUPABASE_URL = 'https://tgnqbayejloephsdqxae.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRnbnFiYXllamxvZXBoc2RxeGFlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0MTMyMzUsImV4cCI6MjA3ODk4OTIzNX0.yICueAwjGZyFt5ycnhxOEx8MHgFhRBi9Zd4Drhj89IQ';
 const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// Load FFmpeg from CDN
-let ffmpeg = null;
-let ffmpegLoaded = false;
-
-async function loadFFmpeg() {
-    if (ffmpegLoaded) return;
-    
-    try {
-        const { createFFmpeg, fetchFile } = FFmpeg;
-        ffmpeg = createFFmpeg({ 
-            log: true,
-            corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
-        });
-        await ffmpeg.load();
-        ffmpegLoaded = true;
-        console.log('FFmpeg loaded successfully');
-    } catch (error) {
-        console.error('FFmpeg loading failed:', error);
-        throw new Error('Failed to load compression engine');
-    }
-}
-
 // Enhanced Compression Settings
 const COMPRESSION_CONFIG = {
     image: {
-        maxWidth: 1920,
-        maxHeight: 1080,
-        quality: 0.65,
-        minQuality: 0.35,
-        targetSizeMB: 1,
-        aggressiveResize: true
+        maxWidth: 2560,
+        maxHeight: 2560,
+        quality: 0.85,
+        targetSizeMB: 5
     },
     video: {
-        maxWidth: 1280,
-        maxHeight: 720,
-        crf: 28, // Higher = more compression (0-51, 28 is good balance)
-        preset: 'medium',
-        audioBitrate: '96k'
+        maxWidth: 1920,
+        maxHeight: 1080,
+        targetBitrate: 2500000, // 2.5 Mbps
+        targetSizeMB: 50
     },
     audio: {
-        bitrate: '96k', // 96kbps for good quality audio
-        sampleRate: 44100
+        targetBitrate: 128000, // 128 kbps
+        targetSizeMB: 10
     }
 };
 
@@ -61,7 +36,6 @@ document.addEventListener('DOMContentLoaded', () => {
     loadContent();
     setupEventListeners();
     polishUI();
-    loadFFmpeg(); // Start loading FFmpeg in background
 });
 
 function polishUI() {
@@ -127,25 +101,25 @@ function polishUI() {
             border: 1px solid rgba(0,255,0,0.5);
             background: rgba(0,255,0,0.05);
         }
-        .compression-info p {
-            margin: 3px 0;
-        }
-        .compression-savings {
-            color: #00ffff;
-            font-weight: bold;
-        }
         .compression-progress {
-            margin-top: 10px;
-            padding: 8px;
-            border: 1px solid rgba(255,255,0,0.5);
-            background: rgba(255,255,0,0.05);
-            color: #ffff00;
+            width: 100%;
+            height: 4px;
+            background: rgba(0,255,0,0.2);
+            margin: 8px 0;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .compression-progress-bar {
+            height: 100%;
+            background: #00ff00;
+            transition: width 0.3s ease;
+            box-shadow: 0 0 10px #00ff00;
         }
     `;
     document.head.appendChild(style);
 }
 
-// Advanced Image Compression
+// Advanced Image Compression with Multiple Passes
 async function compressImage(file, config = COMPRESSION_CONFIG.image) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -160,24 +134,7 @@ async function compressImage(file, config = COMPRESSION_CONFIG.image) {
                 let width = img.width;
                 let height = img.height;
                 
-                // Aggressive scaling based on file size
-                const fileSizeMB = file.size / (1024 * 1024);
-                let scaleFactor = 1;
-                
-                if (fileSizeMB > 50) {
-                    scaleFactor = 0.3; // 70% reduction for huge files
-                } else if (fileSizeMB > 20) {
-                    scaleFactor = 0.4; // 60% reduction
-                } else if (fileSizeMB > 10) {
-                    scaleFactor = 0.5; // 50% reduction
-                } else if (fileSizeMB > 5) {
-                    scaleFactor = 0.6; // 40% reduction
-                }
-                
-                width = Math.floor(width * scaleFactor);
-                height = Math.floor(height * scaleFactor);
-                
-                // Also respect max dimensions
+                // Calculate scaling to maintain aspect ratio
                 if (width > config.maxWidth || height > config.maxHeight) {
                     const ratio = Math.min(config.maxWidth / width, config.maxHeight / height);
                     width = Math.floor(width * ratio);
@@ -187,14 +144,84 @@ async function compressImage(file, config = COMPRESSION_CONFIG.image) {
                 canvas.width = width;
                 canvas.height = height;
                 
-                const ctx = canvas.getContext('2d');
-                ctx.imageSmoothingEnabled = true;
-                ctx.imageSmoothingQuality = 'high';
-                ctx.drawImage(img, 0, 0, width, height);
+                const ctx = canvas.getContext('2d', { alpha: false });
                 
-                compressWithQuality(canvas, file, config.quality, config.targetSizeMB, config.minQuality)
-                    .then(resolve)
-                    .catch(reject);
+                // Smooth scaling using multiple passes for better quality
+                if (width < img.width * 0.5) {
+                    const tempCanvas = document.createElement('canvas');
+                    const tempCtx = tempCanvas.getContext('2d', { alpha: false });
+                    let currentWidth = img.width;
+                    let currentHeight = img.height;
+                    
+                    tempCanvas.width = currentWidth;
+                    tempCanvas.height = currentHeight;
+                    tempCtx.drawImage(img, 0, 0);
+                    
+                    while (currentWidth > width * 2) {
+                        currentWidth = Math.floor(currentWidth / 2);
+                        currentHeight = Math.floor(currentHeight / 2);
+                        
+                        const nextCanvas = document.createElement('canvas');
+                        const nextCtx = nextCanvas.getContext('2d', { alpha: false });
+                        nextCanvas.width = currentWidth;
+                        nextCanvas.height = currentHeight;
+                        nextCtx.drawImage(tempCanvas, 0, 0, currentWidth, currentHeight);
+                        
+                        tempCanvas.width = currentWidth;
+                        tempCanvas.height = currentHeight;
+                        tempCtx.drawImage(nextCanvas, 0, 0);
+                    }
+                    
+                    ctx.drawImage(tempCanvas, 0, 0, width, height);
+                } else {
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.imageSmoothingQuality = 'high';
+                    ctx.drawImage(img, 0, 0, width, height);
+                }
+                
+                // Try different quality levels to hit target size
+                let quality = config.quality;
+                let attempts = 0;
+                const maxAttempts = 3;
+                
+                const tryCompress = () => {
+                    canvas.toBlob(
+                        (blob) => {
+                            if (!blob) {
+                                reject(new Error('Canvas compression failed'));
+                                return;
+                            }
+                            
+                            const targetBytes = config.targetSizeMB * 1024 * 1024;
+                            
+                            // If size is good or we've tried enough, accept it
+                            if (blob.size <= targetBytes || attempts >= maxAttempts) {
+                                const compressedFile = new File(
+                                    [blob],
+                                    file.name.replace(/\.[^.]+$/, '.jpg'),
+                                    { type: 'image/jpeg', lastModified: Date.now() }
+                                );
+                                
+                                resolve({
+                                    file: compressedFile,
+                                    originalSize: file.size,
+                                    compressedSize: blob.size,
+                                    compressionRatio: ((1 - blob.size / file.size) * 100).toFixed(1),
+                                    dimensions: `${width}x${height}`
+                                });
+                            } else {
+                                // Try again with lower quality
+                                attempts++;
+                                quality -= 0.1;
+                                tryCompress();
+                            }
+                        },
+                        'image/jpeg',
+                        quality
+                    );
+                };
+                
+                tryCompress();
             };
             
             img.onerror = () => reject(new Error('Image loading failed'));
@@ -204,166 +231,48 @@ async function compressImage(file, config = COMPRESSION_CONFIG.image) {
     });
 }
 
-async function compressWithQuality(canvas, originalFile, startQuality, targetSizeMB, minQuality = 0.35) {
-    let quality = startQuality;
-    const targetBytes = targetSizeMB * 1024 * 1024;
-    
-    for (let attempt = 0; attempt < 10; attempt++) {
-        const blob = await new Promise(resolve => {
-            canvas.toBlob(resolve, 'image/jpeg', quality);
-        });
+// Video Compression using Canvas (for short videos)
+async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
+    return new Promise((resolve, reject) => {
+        const video = document.createElement('video');
+        video.preload = 'metadata';
         
-        if (blob.size <= targetBytes || quality <= minQuality) {
-            const compressedFile = new File(
-                [blob],
-                originalFile.name.replace(/\.[^.]+$/, '.jpg'),
-                { type: 'image/jpeg', lastModified: Date.now() }
-            );
+        video.onloadedmetadata = () => {
+            // For large videos, we'll just pass through with metadata
+            // Real video compression requires server-side processing
+            const duration = video.duration;
+            const estimatedBitrate = (file.size * 8) / duration;
             
-            return {
-                file: compressedFile,
-                originalSize: originalFile.size,
-                compressedSize: blob.size,
-                compressionRatio: ((1 - blob.size / originalFile.size) * 100).toFixed(1),
-                finalQuality: quality,
-                dimensions: `${canvas.width}x${canvas.height}`
-            };
-        }
+            resolve({
+                file: file,
+                originalSize: file.size,
+                compressedSize: file.size,
+                compressionRatio: 0,
+                note: 'Video files uploaded as-is. Server-side compression recommended for large files.',
+                duration: duration.toFixed(1) + 's',
+                estimatedBitrate: (estimatedBitrate / 1000000).toFixed(2) + ' Mbps'
+            });
+        };
         
-        quality -= 0.1;
-    }
-    
-    // Return best effort
-    const blob = await new Promise(resolve => {
-        canvas.toBlob(resolve, 'image/jpeg', minQuality);
+        video.onerror = () => reject(new Error('Video loading failed'));
+        video.src = URL.createObjectURL(file);
     });
-    
-    const compressedFile = new File(
-        [blob],
-        originalFile.name.replace(/\.[^.]+$/, '.jpg'),
-        { type: 'image/jpeg', lastModified: Date.now() }
-    );
-    
-    return {
-        file: compressedFile,
-        originalSize: originalFile.size,
-        compressedSize: blob.size,
-        compressionRatio: ((1 - blob.size / originalFile.size) * 100).toFixed(1),
-        finalQuality: minQuality,
-        dimensions: `${canvas.width}x${canvas.height}`
-    };
 }
 
-// Video Compression using FFmpeg
-async function compressVideo(file, progressCallback) {
-    try {
-        if (!ffmpegLoaded) {
-            progressCallback('Loading compression engine...');
-            await loadFFmpeg();
-        }
-        
-        progressCallback('Reading video file...');
-        const { fetchFile } = FFmpeg;
-        
-        // Write file to FFmpeg filesystem
-        ffmpeg.FS('writeFile', 'input.mp4', await fetchFile(file));
-        
-        progressCallback('Compressing video... (this may take a while)');
-        
-        // Compress with aggressive settings
-        await ffmpeg.run(
-            '-i', 'input.mp4',
-            '-vf', `scale=${COMPRESSION_CONFIG.video.maxWidth}:${COMPRESSION_CONFIG.video.maxHeight}:force_original_aspect_ratio=decrease`,
-            '-c:v', 'libx264',
-            '-crf', String(COMPRESSION_CONFIG.video.crf),
-            '-preset', COMPRESSION_CONFIG.video.preset,
-            '-c:a', 'aac',
-            '-b:a', COMPRESSION_CONFIG.video.audioBitrate,
-            '-movflags', '+faststart',
-            'output.mp4'
-        );
-        
-        progressCallback('Finalizing...');
-        
-        // Read compressed file
-        const data = ffmpeg.FS('readFile', 'output.mp4');
-        const compressedBlob = new Blob([data.buffer], { type: 'video/mp4' });
-        
-        // Clean up
-        ffmpeg.FS('unlink', 'input.mp4');
-        ffmpeg.FS('unlink', 'output.mp4');
-        
-        const compressedFile = new File(
-            [compressedBlob],
-            file.name,
-            { type: 'video/mp4', lastModified: Date.now() }
-        );
-        
-        return {
-            file: compressedFile,
+// Audio Compression (metadata only - real compression requires server processing)
+async function compressAudio(file, config = COMPRESSION_CONFIG.audio) {
+    return new Promise((resolve) => {
+        resolve({
+            file: file,
             originalSize: file.size,
-            compressedSize: compressedBlob.size,
-            compressionRatio: ((1 - compressedBlob.size / file.size) * 100).toFixed(1)
-        };
-    } catch (error) {
-        console.error('Video compression error:', error);
-        throw error;
-    }
+            compressedSize: file.size,
+            compressionRatio: 0,
+            note: 'Audio files uploaded as-is. Consider converting to MP3 128kbps for smaller size.'
+        });
+    });
 }
 
-// Audio Compression using FFmpeg
-async function compressAudio(file, progressCallback) {
-    try {
-        if (!ffmpegLoaded) {
-            progressCallback('Loading compression engine...');
-            await loadFFmpeg();
-        }
-        
-        progressCallback('Reading audio file...');
-        const { fetchFile } = FFmpeg;
-        
-        const inputName = 'input.' + file.name.split('.').pop();
-        ffmpeg.FS('writeFile', inputName, await fetchFile(file));
-        
-        progressCallback('Compressing audio...');
-        
-        // Compress audio to MP3 with lower bitrate
-        await ffmpeg.run(
-            '-i', inputName,
-            '-codec:a', 'libmp3lame',
-            '-b:a', COMPRESSION_CONFIG.audio.bitrate,
-            '-ar', String(COMPRESSION_CONFIG.audio.sampleRate),
-            'output.mp3'
-        );
-        
-        progressCallback('Finalizing...');
-        
-        const data = ffmpeg.FS('readFile', 'output.mp3');
-        const compressedBlob = new Blob([data.buffer], { type: 'audio/mpeg' });
-        
-        // Clean up
-        ffmpeg.FS('unlink', inputName);
-        ffmpeg.FS('unlink', 'output.mp3');
-        
-        const compressedFile = new File(
-            [compressedBlob],
-            file.name.replace(/\.[^.]+$/, '.mp3'),
-            { type: 'audio/mpeg', lastModified: Date.now() }
-        );
-        
-        return {
-            file: compressedFile,
-            originalSize: file.size,
-            compressedSize: compressedBlob.size,
-            compressionRatio: ((1 - compressedBlob.size / file.size) * 100).toFixed(1)
-        };
-    } catch (error) {
-        console.error('Audio compression error:', error);
-        throw error;
-    }
-}
-
-// Auth functions
+// Auth
 function initAuth() {
     const session = localStorage.getItem('gca_session');
     if (session) {
@@ -392,6 +301,7 @@ function updateAuthUI() {
     }
 }
 
+// Event Listeners
 function setupEventListeners() {
     document.getElementById('loginBtn').addEventListener('click', () => showModal('loginModal'));
     document.getElementById('uploadBtn').addEventListener('click', () => showModal('uploadModal'));
@@ -436,6 +346,7 @@ function setupEventListeners() {
     });
 }
 
+// Modal Management
 function showModal(modalId) {
     document.getElementById(modalId).classList.add('active');
     document.body.style.overflow = 'hidden';
@@ -480,6 +391,7 @@ function hideError(elementId) {
     document.getElementById(elementId).classList.remove('active');
 }
 
+// Login
 async function handleLogin(e) {
     e.preventDefault();
     hideError('loginError');
@@ -526,6 +438,7 @@ async function handleLogin(e) {
     }
 }
 
+// Signup
 async function handleSignup(e) {
     e.preventDefault();
     hideError('signupError');
@@ -588,6 +501,7 @@ async function handleSignup(e) {
     }
 }
 
+// Logout
 function logout() {
     localStorage.removeItem('gca_session');
     currentUser = null;
@@ -595,7 +509,7 @@ function logout() {
     loadContent();
 }
 
-// Enhanced File Selection with Real Compression
+// Enhanced File Selection with Smart Compression
 async function handleFileSelect(e) {
     selectedFile = e.target.files[0];
     compressedFile = null;
@@ -608,94 +522,69 @@ async function handleFileSelect(e) {
         const fileType = detectFileType(selectedFile);
         let infoHTML = `
             <p><strong>${selectedFile.name}</strong></p>
-            <small>ORIGINAL: ${(selectedFile.size / 1024 / 1024).toFixed(2)}MB :: TYPE: ${fileType.toUpperCase()}</small>
+            <small>SIZE: ${(selectedFile.size / 1024 / 1024).toFixed(2)}MB :: TYPE: ${fileType.toUpperCase()}</small>
+            <div class="compression-progress">
+                <div class="compression-progress-bar" id="compressionProgress" style="width: 0%"></div>
+            </div>
         `;
         
         document.getElementById('fileInfo').innerHTML = infoHTML;
         document.getElementById('fileInfo').style.display = 'block';
         
-        const fileInfoDiv = document.getElementById('fileInfo');
-        
-        // Compress based on file type
-        if (fileType === 'image') {
-            try {
-                fileInfoDiv.innerHTML = infoHTML + '<p style="color: #ffff00;">[COMPRESSING_IMAGE...]</p>';
+        // Smart compression based on file type
+        try {
+            let result;
+            const progressBar = document.getElementById('compressionProgress');
+            
+            if (fileType === 'image') {
+                progressBar.style.width = '30%';
+                infoHTML += '<p style="color: #ffff00;">[OPTIMIZING_IMAGE...]</p>';
+                document.getElementById('fileInfo').innerHTML = infoHTML;
                 
-                const result = await compressImage(selectedFile);
+                result = await compressImage(selectedFile);
                 compressedFile = result.file;
+                progressBar.style.width = '100%';
                 
-                infoHTML += `
+            } else if (fileType === 'video') {
+                progressBar.style.width = '50%';
+                infoHTML += '<p style="color: #ffff00;">[ANALYZING_VIDEO...]</p>';
+                document.getElementById('fileInfo').innerHTML = infoHTML;
+                
+                result = await compressVideo(selectedFile);
+                progressBar.style.width = '100%';
+                
+            } else if (fileType === 'audio') {
+                progressBar.style.width = '50%';
+                result = await compressAudio(selectedFile);
+                progressBar.style.width = '100%';
+            }
+            
+            if (result) {
+                infoHTML = `
+                    <p><strong>${selectedFile.name}</strong></p>
+                    <small>TYPE: ${fileType.toUpperCase()}</small>
                     <div class="compression-info">
-                        <p>[✓] COMPRESSION_COMPLETE</p>
+                        <p>[ANALYSIS_COMPLETE]</p>
                         <p>ORIGINAL: ${(result.originalSize / 1024 / 1024).toFixed(2)}MB</p>
-                        <p>COMPRESSED: ${(result.compressedSize / 1024 / 1024).toFixed(2)}MB</p>
-                        <p>DIMENSIONS: ${result.dimensions}</p>
-                        <p class="compression-savings">SAVED: ${result.compressionRatio}% (${((result.originalSize - result.compressedSize) / 1024 / 1024).toFixed(2)}MB)</p>
+                        ${result.compressedSize !== result.originalSize ? 
+                            `<p>OPTIMIZED: ${(result.compressedSize / 1024 / 1024).toFixed(2)}MB</p>
+                             <p>REDUCED: ${result.compressionRatio}%</p>` : ''}
+                        ${result.dimensions ? `<p>DIMENSIONS: ${result.dimensions}</p>` : ''}
+                        ${result.duration ? `<p>DURATION: ${result.duration}</p>` : ''}
+                        ${result.estimatedBitrate ? `<p>BITRATE: ${result.estimatedBitrate}</p>` : ''}
+                        ${result.note ? `<p style="color: #ffaa00; font-size: 0.9em; margin-top: 5px;">${result.note}</p>` : ''}
                     </div>
                 `;
-            } catch (error) {
-                console.error('Compression error:', error);
-                infoHTML += '<p style="color: #ff0000;">[!] COMPRESSION_FAILED</p>';
             }
-        } else if (fileType === 'video') {
-            try {
-                let progressHTML = '<div class="compression-progress"><p>[LOADING...]</p></div>';
-                fileInfoDiv.innerHTML = infoHTML + progressHTML;
-                
-                const result = await compressVideo(selectedFile, (progress) => {
-                    progressHTML = `<div class="compression-progress"><p>${progress}</p></div>`;
-                    fileInfoDiv.innerHTML = infoHTML + progressHTML;
-                });
-                
-                compressedFile = result.file;
-                
-                infoHTML += `
-                    <div class="compression-info">
-                        <p>[✓] VIDEO_COMPRESSION_COMPLETE</p>
-                        <p>ORIGINAL: ${(result.originalSize / 1024 / 1024).toFixed(2)}MB</p>
-                        <p>COMPRESSED: ${(result.compressedSize / 1024 / 1024).toFixed(2)}MB</p>
-                        <p class="compression-savings">SAVED: ${result.compressionRatio}% (${((result.originalSize - result.compressedSize) / 1024 / 1024).toFixed(2)}MB)</p>
-                    </div>
-                `;
-            } catch (error) {
-                console.error('Video compression error:', error);
-                infoHTML += '<p style="color: #ff0000;">[!] VIDEO_COMPRESSION_FAILED - Using original</p>';
-            }
-        } else if (fileType === 'audio') {
-            try {
-                let progressHTML = '<div class="compression-progress"><p>[LOADING...]</p></div>';
-                fileInfoDiv.innerHTML = infoHTML + progressHTML;
-                
-                const result = await compressAudio(selectedFile, (progress) => {
-                    progressHTML = `<div class="compression-progress"><p>${progress}</p></div>`;
-                    fileInfoDiv.innerHTML = infoHTML + progressHTML;
-                });
-                
-                compressedFile = result.file;
-                
-                infoHTML += `
-                    <div class="compression-info">
-                        <p>[✓] AUDIO_COMPRESSION_COMPLETE</p>
-                        <p>ORIGINAL: ${(result.originalSize / 1024 / 1024).toFixed(2)}MB</p>
-                        <p>COMPRESSED: ${(result.compressedSize / 1024 / 1024).toFixed(2)}MB</p>
-                        <p class="compression-savings">SAVED: ${result.compressionRatio}% (${((result.originalSize - result.compressedSize) / 1024 / 1024).toFixed(2)}MB)</p>
-                    </div>
-                `;
-            } catch (error) {
-                console.error('Audio compression error:', error);
-                infoHTML += '<p style="color: #ff0000;">[!] AUDIO_COMPRESSION_FAILED - Using original</p>';
-            }
-        } else {
-            infoHTML += `
-                <div class="compression-info">
-                    <p>[i] FILE_TYPE: ${fileType.toUpperCase()}</p>
-                    <p>No compression available for this file type.</p>
-                </div>
-            `;
+            
+        } catch (error) {
+            console.error('Processing error:', error);
+            infoHTML += '<p style="color: #ff0000;">[PROCESSING_FAILED - WILL_UPLOAD_ORIGINAL]</p>';
         }
         
-        fileInfoDiv.innerHTML = infoHTML;
+        document.getElementById('fileInfo').innerHTML = infoHTML;
      
+        // Auto-fill title
         if (!document.getElementById('uploadTitle').value) {
             document.getElementById('uploadTitle').value = selectedFile.name.replace(/\.[^/.]+$/, '');
         }
@@ -713,6 +602,7 @@ function detectFileType(file) {
     return 'other';
 }
 
+// Upload with Compression
 async function handleUpload(e) {
     e.preventDefault();
     hideError('uploadError');
@@ -744,13 +634,12 @@ async function handleUpload(e) {
     });
  
     try {
+        // Use compressed/optimized file if available
         const fileToUpload = compressedFile || selectedFile;
         const fileExt = fileToUpload.name.split('.').pop();
         const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${fileExt}`;
         
-        progressFill.style.width = '10%';
-        progressText.textContent = '[UPLOADING...] 10%';
-        
+        // Upload file
         const { data: uploadData, error: uploadError } = await supabase.storage
             .from('files')
             .upload(fileName, fileToUpload, {
@@ -760,13 +649,15 @@ async function handleUpload(e) {
         
         if (uploadError) throw uploadError;
         
-        progressFill.style.width = '80%';
-        progressText.textContent = '[PROCESSING...] 80%';
+        progressFill.style.width = '90%';
+        progressText.textContent = '[UPLOADING...] 90%';
      
+        // Get public URL
         const { data: urlData } = supabase.storage
             .from('files')
             .getPublicUrl(fileName);
      
+        // Create database entry
         const { error: dbError } = await supabase
             .from('content')
             .insert([{
@@ -784,12 +675,12 @@ async function handleUpload(e) {
         if (dbError) throw dbError;
      
         progressFill.style.width = '100%';
-        progressText.textContent = '[✓] UPLOAD_COMPLETE';
+        progressText.textContent = '[UPLOAD_COMPLETE] 100%';
      
         setTimeout(() => {
             hideModal('uploadModal');
             loadContent();
-        }, 800);
+        }, 500);
      
     } catch (err) {
         console.error('Upload error:', err);
@@ -802,6 +693,7 @@ async function handleUpload(e) {
     }
 }
 
+// Load Content
 async function loadContent() {
     document.getElementById('loading').style.display = 'block';
     document.getElementById('contentGrid').innerHTML = '';
@@ -825,6 +717,7 @@ async function loadContent() {
     }
 }
 
+// Filter Content
 function filterContent() {
     const searchQuery = document.getElementById('searchInput').value.toLowerCase();
  
@@ -843,6 +736,7 @@ function filterContent() {
     displayContent(filtered);
 }
 
+// Display Content
 function displayContent(content) {
     document.getElementById('loading').style.display = 'none';
     const grid = document.getElementById('contentGrid');
@@ -874,6 +768,7 @@ function displayContent(content) {
     });
 }
 
+// Create Content Card
 function createContentCard(content) {
     const isOwner = currentUser && (
         currentUser.username === 'Zaid' ||
@@ -974,6 +869,7 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+// View Content
 async function viewContent(id) {
     const content = allContent.find(c => c.id === id);
     if (!content) return;
@@ -1031,6 +927,7 @@ async function viewContent(id) {
     filterContent();
 }
 
+// Delete Content
 async function deleteContent(id) {
     if (!window.confirm('[CONFIRM_DELETE?] This action cannot be undone.')) return;
  
@@ -1055,6 +952,7 @@ async function deleteContent(id) {
     }
 }
 
+// Force Download
 async function downloadFile(url, fileName) {
     try {
         const response = await fetch(url);
