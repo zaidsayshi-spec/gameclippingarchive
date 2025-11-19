@@ -33,11 +33,28 @@ let compressedFile = null;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
+    loadFFmpeg();
     initAuth();
     loadContent();
     setupEventListeners();
     polishUI();
 });
+
+// Load FFmpeg library
+async function loadFFmpeg() {
+    if (!window.FFmpeg) {
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';
+        script.async = true;
+        script.onload = () => {
+            console.log('[FFmpeg loaded - video/audio compression enabled]');
+        };
+        script.onerror = () => {
+            console.warn('[FFmpeg failed to load - video/audio will upload as-is]');
+        };
+        document.head.appendChild(script);
+    }
+}
 
 function polishUI() {
     const style = document.createElement('style');
@@ -227,43 +244,46 @@ async function compressImage(file, config = COMPRESSION_CONFIG.image) {
 // Video Compression using FFmpeg.wasm
 async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
     try {
-        // Load FFmpeg
-        if (!window.FFmpeg) {
-            throw new Error('FFmpeg not loaded');
+        console.log('[Starting video compression...]');
+        
+        // Check if FFmpeg is available
+        if (!window.FFmpeg || !window.FFmpeg.createFFmpeg) {
+            throw new Error('FFmpeg library not loaded');
         }
         
         const { createFFmpeg, fetchFile } = window.FFmpeg;
         const ffmpeg = createFFmpeg({ 
-            log: false,
+            log: true,
             corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
         });
         
-        if (!ffmpeg.isLoaded()) {
-            await ffmpeg.load();
-        }
+        console.log('[Loading FFmpeg...]');
+        await ffmpeg.load();
+        console.log('[FFmpeg loaded successfully]');
         
-        const inputName = 'input' + file.name.substring(file.name.lastIndexOf('.'));
+        const inputExt = file.name.substring(file.name.lastIndexOf('.'));
+        const inputName = 'input' + inputExt;
         const outputName = 'output.mp4';
         
-        // Write input file
+        console.log('[Writing input file...]');
         ffmpeg.FS('writeFile', inputName, await fetchFile(file));
         
-        // Compress video with good quality settings
-        // -crf 28 = good quality/size balance (lower = better quality, 18-28 recommended)
-        // -preset fast = encoding speed
-        // -vf scale for resolution limiting
+        console.log('[Starting FFmpeg compression...]');
+        // Compress video with aggressive settings for size reduction
         await ffmpeg.run(
             '-i', inputName,
             '-c:v', 'libx264',
             '-crf', '28',
-            '-preset', 'fast',
+            '-preset', 'medium',
             '-vf', `scale='min(${config.maxWidth},iw)':'min(${config.maxHeight},ih)':force_original_aspect_ratio=decrease`,
             '-c:a', 'aac',
             '-b:a', '128k',
             '-movflags', '+faststart',
+            '-y',
             outputName
         );
         
+        console.log('[Reading compressed file...]');
         // Read compressed file
         const data = ffmpeg.FS('readFile', outputName);
         const compressedBlob = new Blob([data.buffer], { type: 'video/mp4' });
@@ -273,9 +293,15 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
             { type: 'video/mp4', lastModified: Date.now() }
         );
         
+        console.log(`[Compression complete: ${file.size} -> ${compressedBlob.size}]`);
+        
         // Clean up
-        ffmpeg.FS('unlink', inputName);
-        ffmpeg.FS('unlink', outputName);
+        try {
+            ffmpeg.FS('unlink', inputName);
+            ffmpeg.FS('unlink', outputName);
+        } catch (e) {
+            console.warn('[Cleanup warning:', e);
+        }
         
         return {
             file: compressedFile,
@@ -285,14 +311,15 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
         };
         
     } catch (error) {
-        console.error('Video compression error:', error);
+        console.error('[Video compression error:]', error);
         // Fallback: return original file
         return {
             file: file,
             originalSize: file.size,
             compressedSize: file.size,
             compressionRatio: 0,
-            note: 'Video compression unavailable - uploaded as original'
+            error: true,
+            note: `Video compression failed: ${error.message}. Uploading original file.`
         };
     }
 }
@@ -300,36 +327,42 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
 // Audio Compression using FFmpeg.wasm
 async function compressAudio(file, config = COMPRESSION_CONFIG.audio) {
     try {
-        // Load FFmpeg
-        if (!window.FFmpeg) {
-            throw new Error('FFmpeg not loaded');
+        console.log('[Starting audio compression...]');
+        
+        // Check if FFmpeg is available
+        if (!window.FFmpeg || !window.FFmpeg.createFFmpeg) {
+            throw new Error('FFmpeg library not loaded');
         }
         
         const { createFFmpeg, fetchFile } = window.FFmpeg;
         const ffmpeg = createFFmpeg({ 
-            log: false,
+            log: true,
             corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
         });
         
-        if (!ffmpeg.isLoaded()) {
-            await ffmpeg.load();
-        }
+        console.log('[Loading FFmpeg...]');
+        await ffmpeg.load();
+        console.log('[FFmpeg loaded successfully]');
         
-        const inputName = 'input' + file.name.substring(file.name.lastIndexOf('.'));
+        const inputExt = file.name.substring(file.name.lastIndexOf('.'));
+        const inputName = 'input' + inputExt;
         const outputName = 'output.mp3';
         
-        // Write input file
+        console.log('[Writing input file...]');
         ffmpeg.FS('writeFile', inputName, await fetchFile(file));
         
+        console.log('[Starting FFmpeg compression...]');
         // Compress audio to MP3 128kbps
         await ffmpeg.run(
             '-i', inputName,
             '-c:a', 'libmp3lame',
             '-b:a', '128k',
             '-ar', '44100',
+            '-y',
             outputName
         );
         
+        console.log('[Reading compressed file...]');
         // Read compressed file
         const data = ffmpeg.FS('readFile', outputName);
         const compressedBlob = new Blob([data.buffer], { type: 'audio/mpeg' });
@@ -339,9 +372,15 @@ async function compressAudio(file, config = COMPRESSION_CONFIG.audio) {
             { type: 'audio/mpeg', lastModified: Date.now() }
         );
         
+        console.log(`[Compression complete: ${file.size} -> ${compressedBlob.size}]`);
+        
         // Clean up
-        ffmpeg.FS('unlink', inputName);
-        ffmpeg.FS('unlink', outputName);
+        try {
+            ffmpeg.FS('unlink', inputName);
+            ffmpeg.FS('unlink', outputName);
+        } catch (e) {
+            console.warn('[Cleanup warning:', e);
+        }
         
         return {
             file: compressedFile,
@@ -351,14 +390,15 @@ async function compressAudio(file, config = COMPRESSION_CONFIG.audio) {
         };
         
     } catch (error) {
-        console.error('Audio compression error:', error);
+        console.error('[Audio compression error:]', error);
         // Fallback: return original file
         return {
             file: file,
             originalSize: file.size,
             compressedSize: file.size,
             compressionRatio: 0,
-            note: 'Audio compression unavailable - uploaded as original'
+            error: true,
+            note: `Audio compression failed: ${error.message}. Uploading original file.`
         };
     }
 }
@@ -733,10 +773,18 @@ async function handleUpload(e) {
         const randomStr = Math.random().toString(36).substr(2, 9);
         const originalExt = selectedFile.name.split('.').pop().toLowerCase();
         
-        // For compressed images, use .jpg extension, otherwise keep original
+        // Determine final extension based on compression
         let finalExt = originalExt;
-        if (compressedFile && detectFileType(selectedFile) === 'image') {
-            finalExt = 'jpg';
+        const fileType = detectFileType(selectedFile);
+        
+        if (compressedFile) {
+            if (fileType === 'image') {
+                finalExt = 'jpg';
+            } else if (fileType === 'video') {
+                finalExt = 'mp4';
+            } else if (fileType === 'audio') {
+                finalExt = 'mp3';
+            }
         }
         
         const fileName = `${timestamp}-${randomStr}.${finalExt}`;
