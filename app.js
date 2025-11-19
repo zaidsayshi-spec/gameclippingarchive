@@ -29,6 +29,7 @@ let allContent = [];
 let currentFilter = 'all';
 let selectedFile = null;
 let compressedFile = null;
+let isProcessing = false; // Add processing flag
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
@@ -218,23 +219,49 @@ async function compressImage(file, config = COMPRESSION_CONFIG.image) {
 
 // Browser-Native Video Compression using Canvas + MediaRecorder
 async function compressVideo(file, config = COMPRESSION_CONFIG.video, onProgress) {
-    try {
-        console.log('[Starting browser-native video compression...]');
+    console.log('[Starting browser-native video compression...]');
+    
+    return new Promise((resolve, reject) => {
+        const video = document.createElement('video');
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
         
-        return new Promise((resolve, reject) => {
-            const video = document.createElement('video');
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            
-            video.muted = true;
-            video.playsInline = true;
-            video.preload = 'metadata';
-            
-            // Set source ONCE before setting up event handlers
-            const videoUrl = URL.createObjectURL(file);
-            video.src = videoUrl;
-            
-            video.onloadedmetadata = () => {
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'auto';
+        
+        const videoUrl = URL.createObjectURL(file);
+        let mediaRecorder = null;
+        let isRecording = false;
+        
+        const cleanup = () => {
+            try {
+                if (mediaRecorder && isRecording) {
+                    mediaRecorder.stop();
+                }
+                URL.revokeObjectURL(videoUrl);
+                video.src = '';
+                video.load();
+            } catch (e) {
+                console.warn('[Cleanup warning]', e);
+            }
+        };
+        
+        const handleError = (msg, err) => {
+            console.error(`[${msg}]`, err);
+            cleanup();
+            resolve({
+                file: file,
+                originalSize: file.size,
+                compressedSize: file.size,
+                compressionRatio: 0,
+                error: true,
+                note: `Video compression failed: ${err?.message || msg}. Uploading original.`
+            });
+        };
+        
+        video.onloadedmetadata = () => {
+            try {
                 // Calculate dimensions
                 let width = video.videoWidth;
                 let height = video.videoHeight;
@@ -245,41 +272,50 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video, onProgress
                 canvas.width = width;
                 canvas.height = height;
                 
-                console.log(`[Video dimensions: ${width}x${height}, duration: ${video.duration}s]`);
+                console.log(`[Video: ${width}x${height}, ${video.duration.toFixed(1)}s]`);
                 
-                // Check supported MIME types
+                // Check MIME type support
                 let mimeType = 'video/webm;codecs=vp8';
                 if (!MediaRecorder.isTypeSupported(mimeType)) {
                     mimeType = 'video/webm';
                 }
                 
                 if (!MediaRecorder.isTypeSupported(mimeType)) {
-                    console.error('[No supported video MIME type found]');
-                    URL.revokeObjectURL(videoUrl);
-                    reject(new Error('MediaRecorder not supported for video'));
+                    handleError('MediaRecorder not supported', new Error('No supported video codec'));
                     return;
                 }
                 
-                console.log(`[Using MIME type: ${mimeType}]`);
+                console.log(`[Using: ${mimeType}]`);
                 
-                // Start capturing from canvas
+                // Setup canvas stream
                 const stream = canvas.captureStream(config.fps);
                 
-                const mediaRecorder = new MediaRecorder(stream, {
-                    mimeType: mimeType,
-                    videoBitsPerSecond: config.bitrate
-                });
+                try {
+                    mediaRecorder = new MediaRecorder(stream, {
+                        mimeType: mimeType,
+                        videoBitsPerSecond: config.bitrate
+                    });
+                } catch (e) {
+                    handleError('MediaRecorder creation failed', e);
+                    return;
+                }
                 
                 const chunks = [];
+                let frameCount = 0;
+                let animationFrame = null;
                 
                 mediaRecorder.ondataavailable = (e) => {
-                    if (e.data.size > 0) {
+                    if (e.data && e.data.size > 0) {
                         chunks.push(e.data);
                     }
                 };
                 
                 mediaRecorder.onstop = () => {
-                    URL.revokeObjectURL(videoUrl);
+                    isRecording = false;
+                    if (animationFrame) {
+                        cancelAnimationFrame(animationFrame);
+                    }
+                    
                     const blob = new Blob(chunks, { type: 'video/webm' });
                     const compressedFile = new File(
                         [blob],
@@ -287,7 +323,9 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video, onProgress
                         { type: 'video/webm', lastModified: Date.now() }
                     );
                     
-                    console.log(`[✓ Video compressed: ${(file.size/1024/1024).toFixed(2)}MB → ${(blob.size/1024/1024).toFixed(2)}MB]`);
+                    console.log(`[✓ Compressed: ${(file.size/1024/1024).toFixed(2)}MB → ${(blob.size/1024/1024).toFixed(2)}MB, ${frameCount} frames]`);
+                    
+                    cleanup();
                     
                     resolve({
                         file: compressedFile,
@@ -300,193 +338,223 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video, onProgress
                 };
                 
                 mediaRecorder.onerror = (e) => {
-                    console.error('[MediaRecorder error]', e);
-                    URL.revokeObjectURL(videoUrl);
-                    reject(new Error('MediaRecorder failed'));
+                    handleError('MediaRecorder error', e.error);
                 };
                 
-                // Draw frames to canvas
-                let frameCount = 0;
-                const frameInterval = 1000 / config.fps;
-                let lastFrameTime = 0;
-                
-                const drawFrame = (currentTime) => {
+                // Frame drawing logic
+                const drawFrame = () => {
                     if (video.paused || video.ended) {
                         return;
                     }
                     
-                    const elapsed = currentTime - lastFrameTime;
-                    
-                    if (elapsed >= frameInterval) {
+                    try {
                         ctx.drawImage(video, 0, 0, width, height);
                         frameCount++;
-                        lastFrameTime = currentTime;
                         
-                        if (onProgress && video.duration) {
-                            const progress = (video.currentTime / video.duration) * 100;
-                            onProgress(Math.min(progress, 99));
+                        if (onProgress && video.duration > 0) {
+                            const progress = Math.min((video.currentTime / video.duration) * 100, 99);
+                            onProgress(progress);
                         }
+                    } catch (e) {
+                        console.warn('[Frame draw error]', e);
                     }
                     
-                    requestAnimationFrame(drawFrame);
+                    animationFrame = requestAnimationFrame(drawFrame);
                 };
                 
                 video.onended = () => {
-                    console.log(`[Video ended, ${frameCount} frames captured]`);
+                    console.log('[Video playback ended]');
+                    if (animationFrame) {
+                        cancelAnimationFrame(animationFrame);
+                    }
                     setTimeout(() => {
-                        mediaRecorder.stop();
+                        if (mediaRecorder && isRecording) {
+                            mediaRecorder.stop();
+                        }
                     }, 500);
                 };
                 
                 video.onerror = (e) => {
-                    console.error('[Video error]', e);
-                    URL.revokeObjectURL(videoUrl);
-                    reject(new Error('Video playback failed'));
+                    handleError('Video playback error', e);
                 };
                 
                 // Start everything
-                mediaRecorder.start(100); // Collect data every 100ms
-                video.play()
-                    .then(() => {
-                        console.log('[Video playback started]');
-                        requestAnimationFrame(drawFrame);
-                    })
-                    .catch(err => {
-                        console.error('[Video play error]', err);
-                        URL.revokeObjectURL(videoUrl);
-                        mediaRecorder.stop();
-                        reject(err);
+                try {
+                    mediaRecorder.start(100);
+                    isRecording = true;
+                    
+                    video.play().then(() => {
+                        console.log('[Playback & recording started]');
+                        animationFrame = requestAnimationFrame(drawFrame);
+                    }).catch(err => {
+                        handleError('Play failed', err);
                     });
-            };
-            
-            video.onerror = (e) => {
-                console.error('[Video metadata error]', e);
-                URL.revokeObjectURL(videoUrl);
-                reject(new Error('Video metadata loading failed'));
-            };
-        });
-        
-    } catch (error) {
-        console.error('[✗ Video compression error:]', error);
-        return {
-            file: file,
-            originalSize: file.size,
-            compressedSize: file.size,
-            compressionRatio: 0,
-            error: true,
-            note: `Video compression failed: ${error.message}. Uploading original.`
+                    
+                } catch (e) {
+                    handleError('Start failed', e);
+                }
+                
+            } catch (err) {
+                handleError('Setup error', err);
+            }
         };
-    }
+        
+        video.onerror = (e) => {
+            handleError('Video load error', e);
+        };
+        
+        // Load video - do this LAST
+        video.src = videoUrl;
+        
+    });
 }
 
 // Browser-Native Audio Compression using MediaRecorder
 async function compressAudio(file, config = COMPRESSION_CONFIG.audio) {
-    try {
-        console.log('[Starting browser-native audio compression...]');
+    console.log('[Starting browser-native audio compression...]');
+    
+    return new Promise((resolve, reject) => {
+        const audio = document.createElement('audio');
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
         
-        return new Promise((resolve, reject) => {
-            const audio = document.createElement('audio');
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            
-            audio.onloadedmetadata = async () => {
+        const audioUrl = URL.createObjectURL(file);
+        let mediaRecorder = null;
+        let isRecording = false;
+        
+        const cleanup = () => {
+            try {
+                if (mediaRecorder && isRecording) {
+                    mediaRecorder.stop();
+                }
+                audioContext.close();
+                URL.revokeObjectURL(audioUrl);
+                audio.src = '';
+            } catch (e) {
+                console.warn('[Cleanup warning]', e);
+            }
+        };
+        
+        const handleError = (msg, err) => {
+            console.error(`[${msg}]`, err);
+            cleanup();
+            resolve({
+                file: file,
+                originalSize: file.size,
+                compressedSize: file.size,
+                compressionRatio: 0,
+                error: true,
+                note: `Audio compression failed: ${err?.message || msg}. Uploading original.`
+            });
+        };
+        
+        audio.onloadedmetadata = () => {
+            try {
+                console.log(`[Audio duration: ${audio.duration.toFixed(1)}s]`);
+                
+                // Check MIME type support
+                let mimeType = 'audio/webm;codecs=opus';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'audio/webm';
+                }
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'audio/ogg;codecs=opus';
+                }
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    handleError('MediaRecorder not supported', new Error('No supported audio codec'));
+                    return;
+                }
+                
+                console.log(`[Using: ${mimeType}]`);
+                
+                const source = audioContext.createMediaElementSource(audio);
+                const dest = audioContext.createMediaStreamDestination();
+                source.connect(dest);
+                
                 try {
-                    const source = audioContext.createMediaElementSource(audio);
-                    const dest = audioContext.createMediaStreamDestination();
-                    source.connect(dest);
-                    
-                    // Check supported MIME types
-                    let mimeType = 'audio/webm;codecs=opus';
-                    if (!MediaRecorder.isTypeSupported(mimeType)) {
-                        mimeType = 'audio/webm';
-                    }
-                    if (!MediaRecorder.isTypeSupported(mimeType)) {
-                        mimeType = 'audio/ogg;codecs=opus';
-                    }
-                    
-                    const mediaRecorder = new MediaRecorder(dest.stream, {
+                    mediaRecorder = new MediaRecorder(dest.stream, {
                         mimeType: mimeType,
                         audioBitsPerSecond: config.bitrate
                     });
+                } catch (e) {
+                    handleError('MediaRecorder creation failed', e);
+                    return;
+                }
+                
+                const chunks = [];
+                
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data && e.data.size > 0) {
+                        chunks.push(e.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = () => {
+                    isRecording = false;
+                    const blob = new Blob(chunks, { type: mimeType });
+                    const ext = mimeType.includes('ogg') ? '.ogg' : '.webm';
+                    const compressedFile = new File(
+                        [blob],
+                        file.name.replace(/\.[^.]+$/, '_compressed' + ext),
+                        { type: mimeType, lastModified: Date.now() }
+                    );
                     
-                    const chunks = [];
+                    console.log(`[✓ Compressed: ${(file.size/1024/1024).toFixed(2)}MB → ${(blob.size/1024/1024).toFixed(2)}MB]`);
                     
-                    mediaRecorder.ondataavailable = (e) => {
-                        if (e.data.size > 0) {
-                            chunks.push(e.data);
-                        }
-                    };
+                    cleanup();
                     
-                    mediaRecorder.onstop = () => {
-                        const blob = new Blob(chunks, { type: mimeType });
-                        const ext = mimeType.includes('ogg') ? '.ogg' : '.webm';
-                        const compressedFile = new File(
-                            [blob],
-                            file.name.replace(/\.[^.]+$/, '_compressed' + ext),
-                            { type: mimeType, lastModified: Date.now() }
-                        );
-                        
-                        console.log(`[✓ Audio compressed: ${(file.size/1024/1024).toFixed(2)}MB → ${(blob.size/1024/1024).toFixed(2)}MB]`);
-                        
-                        audioContext.close();
-                        
-                        resolve({
-                            file: compressedFile,
-                            originalSize: file.size,
-                            compressedSize: blob.size,
-                            compressionRatio: ((1 - blob.size / file.size) * 100).toFixed(1)
-                        });
-                    };
-                    
-                    mediaRecorder.onerror = (e) => {
-                        console.error('[MediaRecorder error]', e);
-                        audioContext.close();
-                        reject(new Error('MediaRecorder failed'));
-                    };
-                    
-                    audio.onended = () => {
-                        console.log('[Audio ended]');
-                        setTimeout(() => {
+                    resolve({
+                        file: compressedFile,
+                        originalSize: file.size,
+                        compressedSize: blob.size,
+                        compressionRatio: ((1 - blob.size / file.size) * 100).toFixed(1)
+                    });
+                };
+                
+                mediaRecorder.onerror = (e) => {
+                    handleError('MediaRecorder error', e.error);
+                };
+                
+                audio.onended = () => {
+                    console.log('[Audio playback ended]');
+                    setTimeout(() => {
+                        if (mediaRecorder && isRecording) {
                             mediaRecorder.stop();
-                        }, 100);
-                    };
+                        }
+                    }, 500);
+                };
+                
+                audio.onerror = (e) => {
+                    handleError('Audio playback error', e);
+                };
+                
+                // Start everything
+                try {
+                    mediaRecorder.start(100);
+                    isRecording = true;
                     
-                    audio.onerror = () => {
-                        audioContext.close();
-                        reject(new Error('Audio playback failed'));
-                    };
-                    
-                    // Start recording and playback
-                    mediaRecorder.start();
-                    audio.play().catch(err => {
-                        console.error('[Audio play error]', err);
-                        audioContext.close();
-                        reject(err);
+                    audio.play().then(() => {
+                        console.log('[Playback & recording started]');
+                    }).catch(err => {
+                        handleError('Play failed', err);
                     });
                     
-                } catch (err) {
-                    audioContext.close();
-                    reject(err);
+                } catch (e) {
+                    handleError('Start failed', e);
                 }
-            };
-            
-            audio.onerror = () => {
-                reject(new Error('Audio metadata loading failed'));
-            };
-            
-            audio.src = URL.createObjectURL(file);
-        });
-        
-    } catch (error) {
-        console.error('[✗ Audio compression error:]', error);
-        return {
-            file: file,
-            originalSize: file.size,
-            compressedSize: file.size,
-            compressionRatio: 0,
-            error: true,
-            note: `Audio compression failed: ${error.message}. Uploading original.`
+                
+            } catch (err) {
+                handleError('Setup error', err);
+            }
         };
-    }
+        
+        audio.onerror = (e) => {
+            handleError('Audio load error', e);
+        };
+        
+        // Load audio - do this LAST
+        audio.src = audioUrl;
+        
+    });
 }
 
 // Auth
@@ -586,6 +654,7 @@ function hideModal(modalId) {
         document.getElementById('uploadProgress').style.display = 'none';
         selectedFile = null;
         compressedFile = null;
+        isProcessing = false; // Reset processing flag
         document.querySelector('.file-label').classList.remove('has-file');
         document.getElementById('fileInput').value = '';
     } else if (modalId === 'viewModal') {
@@ -728,10 +797,22 @@ function logout() {
 
 // Enhanced File Selection with Smart Compression
 async function handleFileSelect(e) {
+    // Prevent multiple simultaneous processing
+    if (isProcessing) {
+        console.log('[Already processing a file, ignoring duplicate event]');
+        return;
+    }
+    
     selectedFile = e.target.files[0];
     compressedFile = null;
     
-    if (selectedFile) {
+    if (!selectedFile) {
+        return;
+    }
+    
+    isProcessing = true;
+    
+    try {
         const fileLabel = document.querySelector('.file-label');
         fileLabel.classList.add('has-file');
         document.getElementById('fileLabel').textContent = '[FILE_LOADED]';
@@ -749,68 +830,62 @@ async function handleFileSelect(e) {
         document.getElementById('fileInfo').style.display = 'block';
         
         // Smart compression based on file type
-        try {
-            let result;
-            const progressBar = document.getElementById('compressionProgress');
+        let result;
+        const progressBar = document.getElementById('compressionProgress');
+        
+        if (fileType === 'image') {
+            progressBar.style.width = '30%';
+            infoHTML += '<p style="color: #ffff00;">[OPTIMIZING_IMAGE...]</p>';
+            document.getElementById('fileInfo').innerHTML = infoHTML;
             
-            if (fileType === 'image') {
-                progressBar.style.width = '30%';
-                infoHTML += '<p style="color: #ffff00;">[OPTIMIZING_IMAGE...]</p>';
-                document.getElementById('fileInfo').innerHTML = infoHTML;
-                
-                result = await compressImage(selectedFile);
+            result = await compressImage(selectedFile);
+            compressedFile = result.file;
+            progressBar.style.width = '100%';
+            
+        } else if (fileType === 'video') {
+            infoHTML += '<p style="color: #ffff00;">[PROCESSING_VIDEO...] This may take a while...</p>';
+            document.getElementById('fileInfo').innerHTML = infoHTML;
+            
+            result = await compressVideo(selectedFile, COMPRESSION_CONFIG.video, (progress) => {
+                progressBar.style.width = progress + '%';
+            });
+            
+            if (result && !result.error) {
                 compressedFile = result.file;
-                progressBar.style.width = '100%';
-                
-            } else if (fileType === 'video') {
-                infoHTML += '<p style="color: #ffff00;">[PROCESSING_VIDEO...]</p>';
-                document.getElementById('fileInfo').innerHTML = infoHTML;
-                
-                result = await compressVideo(selectedFile, COMPRESSION_CONFIG.video, (progress) => {
-                    progressBar.style.width = progress + '%';
-                });
-                
-                if (result && !result.error) {
-                    compressedFile = result.file;
-                }
-                progressBar.style.width = '100%';
-                
-            } else if (fileType === 'audio') {
-                infoHTML += '<p style="color: #ffff00;">[PROCESSING_AUDIO...]</p>';
-                document.getElementById('fileInfo').innerHTML = infoHTML;
-                progressBar.style.width = '50%';
-                
-                result = await compressAudio(selectedFile);
-                
-                if (result && !result.error) {
-                    compressedFile = result.file;
-                }
-                progressBar.style.width = '100%';
             }
+            progressBar.style.width = '100%';
             
-            if (result) {
-                infoHTML = `
-                    <p><strong>${selectedFile.name}</strong></p>
-                    <small>TYPE: ${fileType.toUpperCase()}</small>
-                    <div class="compression-info">
-                        <p>[COMPRESSION_COMPLETE]</p>
-                        ${result.originalDimensions ? `<p>ORIGINAL_DIM: ${result.originalDimensions}</p>` : ''}
-                        ${result.dimensions ? `<p>COMPRESSED_DIM: ${result.dimensions}</p>` : ''}
-                        <p>ORIGINAL_SIZE: ${(result.originalSize / 1024 / 1024).toFixed(2)}MB</p>
-                        <p>COMPRESSED_SIZE: ${(result.compressedSize / 1024 / 1024).toFixed(2)}MB</p>
-                        <p style="color: #00ffff;">SPACE_SAVED: ${result.compressionRatio}%</p>
-                        ${result.error ? 
-                            `<p style="color: #ffaa00;">⚠ ${result.note}</p>` :
-                            result.compressedSize < result.originalSize ? 
-                                `<p style="color: #00ff00;">✓ COMPRESSION_SUCCESSFUL</p>` : 
-                                `<p style="color: #ffaa00;">⚠ FILE_ALREADY_OPTIMIZED</p>`}
-                    </div>
-                `;
+        } else if (fileType === 'audio') {
+            infoHTML += '<p style="color: #ffff00;">[PROCESSING_AUDIO...] This may take a while...</p>';
+            document.getElementById('fileInfo').innerHTML = infoHTML;
+            progressBar.style.width = '50%';
+            
+            result = await compressAudio(selectedFile);
+            
+            if (result && !result.error) {
+                compressedFile = result.file;
             }
-            
-        } catch (error) {
-            console.error('Processing error:', error);
-            infoHTML += '<p style="color: #ff0000;">[PROCESSING_FAILED - WILL_UPLOAD_ORIGINAL]</p>';
+            progressBar.style.width = '100%';
+        }
+        
+        if (result) {
+            infoHTML = `
+                <p><strong>${selectedFile.name}</strong></p>
+                <small>TYPE: ${fileType.toUpperCase()}</small>
+                <div class="compression-info">
+                    <p>[COMPRESSION_COMPLETE]</p>
+                    ${result.originalDimensions ? `<p>ORIGINAL_DIM: ${result.originalDimensions}</p>` : ''}
+                    ${result.dimensions ? `<p>COMPRESSED_DIM: ${result.dimensions}</p>` : ''}
+                    <p>ORIGINAL_SIZE: ${(result.originalSize / 1024 / 1024).toFixed(2)}MB</p>
+                    <p>COMPRESSED_SIZE: ${(result.compressedSize / 1024 / 1024).toFixed(2)}MB</p>
+                    <p style="color: #00ffff;">SPACE_SAVED: ${result.compressionRatio}%</p>
+                    ${result.error ? 
+                        `<p style="color: #ffaa00;">⚠ ${result.note}</p>` :
+                        result.compressedSize < result.originalSize ? 
+                            `<p style="color: #00ff00;">✓ COMPRESSION_SUCCESSFUL</p>` : 
+                            `<p style="color: #ffaa00;">⚠ FILE_ALREADY_OPTIMIZED</p>`}
+                </div>
+            `;
         }
         
         document.getElementById('fileInfo').innerHTML = infoHTML;
@@ -819,6 +894,17 @@ async function handleFileSelect(e) {
         if (!document.getElementById('uploadTitle').value) {
             document.getElementById('uploadTitle').value = selectedFile.name.replace(/\.[^/.]+$/, '');
         }
+        
+    } catch (error) {
+        console.error('Processing error:', error);
+        let infoHTML = `
+            <p><strong>${selectedFile.name}</strong></p>
+            <p style="color: #ff0000;">[PROCESSING_FAILED - WILL_UPLOAD_ORIGINAL]</p>
+            <p style="color: #ffaa00; font-size: 0.85em;">${error.message}</p>
+        `;
+        document.getElementById('fileInfo').innerHTML = infoHTML;
+    } finally {
+        isProcessing = false;
     }
 }
 
