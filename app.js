@@ -116,15 +116,11 @@ function polishUI() {
       transition: width 0.3s ease;
       box-shadow: 0 0 10px #00ff00;
     }
-    .upload-progress-container {
-      position: fixed;
-      bottom: 10px;
-      right: 10px;
-      background: #000;
+    .video-preview {
+      width: 100%;
+      height: auto;
+      margin-top: 10px;
       border: 1px solid #00ff00;
-      padding: 10px;
-      box-shadow: 0 0 10px #00ff00;
-      z-index: 1000;
     }
   `;
   document.head.appendChild(style);
@@ -266,10 +262,10 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
-    canvas.style.display = 'none';
-    document.body.appendChild(canvas);
+    canvas.className = 'video-preview';
+    document.getElementById('fileInfo').appendChild(canvas);
     const ctx = canvas.getContext('2d');
-    const canvasStream = canvas.captureStream(60); // Higher FPS to avoid dropping frames
+    const canvasStream = canvas.captureStream(30); // Higher FPS for better quality
     const audioStream = video.captureStream();
     const audioTrack = audioStream.getAudioTracks()[0];
     const combinedStream = new MediaStream();
@@ -322,7 +318,7 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
     const compressedFile = new File([blob], file.name.replace(/\.[^.]+$/, '_compressed.' + ext), { type: mimeType.split(';')[0] });
     console.log(`[✓ Video compressed: ${(file.size/1024/1024).toFixed(2)}MB → ${(blob.size/1024/1024).toFixed(2)}MB]`);
     document.body.removeChild(video);
-    document.body.removeChild(canvas);
+    document.getElementById('fileInfo').removeChild(canvas);
     URL.revokeObjectURL(url);
     return {
       file: compressedFile,
