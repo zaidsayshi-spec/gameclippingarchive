@@ -42,15 +42,14 @@ async function getFFmpegInstance() {
   }
   ffmpegLoading = true;
   try {
-    const { createFFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js');
+    const { FFmpeg } = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js');
     const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
-    ffmpegInstance = createFFmpeg({
-      log: true,
-      corePath: `${baseURL}/ffmpeg-core.js`,
-      wasmPath: `${baseURL}/ffmpeg-core.wasm`,
-      workerPath: `${baseURL}/ffmpeg-core.worker.js`
+    ffmpegInstance = new FFmpeg();
+    await ffmpegInstance.load({
+      coreURL: `${baseURL}/ffmpeg-core.js`,
+      wasmURL: `${baseURL}/ffmpeg-core.wasm`,
+      workerURL: `${baseURL}/ffmpeg-core.worker.js`
     });
-    await ffmpegInstance.load();
     ffmpegLoading = false;
     return ffmpegInstance;
   } catch (error) {
@@ -248,7 +247,7 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
     await ffmpeg.writeFile(inputName, await fetchFile(file));
     console.log('[Starting FFmpeg video compression...]');
     // Compress video
-    await ffmpeg.run(
+    await ffmpeg.exec([
       '-i', inputName,
       '-c:v', 'libx264',
       '-crf', '28',
@@ -258,7 +257,7 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
       '-b:a', '128k',
       '-movflags', '+faststart',
       '-y', outputName
-    );
+    ]);
     console.log('[Reading compressed video...]');
     const data = await ffmpeg.readFile(outputName);
     const compressedBlob = new Blob([data.buffer], { type: 'video/mp4' });
@@ -307,13 +306,13 @@ async function compressAudio(file, config = COMPRESSION_CONFIG.audio) {
     await ffmpeg.writeFile(inputName, await fetchFile(file));
     console.log('[Starting FFmpeg audio compression...]');
     // Compress audio to MP3 128kbps
-    await ffmpeg.run(
+    await ffmpeg.exec([
       '-i', inputName,
       '-c:a', 'libmp3lame',
       '-b:a', '128k',
       '-ar', '44100',
       '-y', outputName
-    );
+    ]);
     console.log('[Reading compressed audio...]');
     const data = await ffmpeg.readFile(outputName);
     const compressedBlob = new Blob([data.buffer], { type: 'audio/mpeg' });
