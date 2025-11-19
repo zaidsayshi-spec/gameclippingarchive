@@ -13,13 +13,13 @@ const COMPRESSION_CONFIG = {
     minQuality: 0.6 // Minimum quality threshold
   },
   video: {
-    maxWidth: 1920,
-    maxHeight: 1080,
-    targetBitrate: 2000000, // Reduced slightly for potential smaller size/faster
+    maxWidth: 1280,
+    maxHeight: 720,
+    targetBitrate: 1500000,
     targetSizeMB: Infinity
   },
   audio: {
-    targetBitrate: 96000, // Reduced for smaller size/faster
+    targetBitrate: 64000,
     targetSizeMB: Infinity
   }
 };
@@ -233,7 +233,7 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
     canvas.style.display = 'none';
     document.body.appendChild(canvas);
     const ctx = canvas.getContext('2d');
-    const canvasStream = canvas.captureStream(15); // Lower FPS for faster/smaller output
+    const canvasStream = canvas.captureStream(24); // Balanced FPS for quality without too much size
     const audioStream = video.captureStream();
     const audioTrack = audioStream.getAudioTracks()[0];
     const combinedStream = new MediaStream();
@@ -242,7 +242,7 @@ async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
     const options = {
       mimeType: 'video/webm;codecs=vp8,opus',
       videoBitsPerSecond: config.targetBitrate,
-      audioBitsPerSecond: 96000 // Reduced for smaller size
+      audioBitsPerSecond: 64000 // Reduced for smaller size
     };
     const mediaRecorder = new MediaRecorder(combinedStream, options);
     const chunks = [];
@@ -605,16 +605,20 @@ async function handleFileSelect(e) {
         infoHTML += '<p style="color: #ffff00;">[OPTIMIZING_IMAGE...]</p>';
         document.getElementById('fileInfo').innerHTML = infoHTML;
         result = await compressImage(selectedFile);
+        compressedFile = result.file;
+        progressBar.style.width = '100%';
       } else if (fileType === 'video') {
         progressBar.style.width = '30%';
         infoHTML += '<p style="color: #ffff00;">[COMPRESSING_VIDEO...]</p>';
         document.getElementById('fileInfo').innerHTML = infoHTML;
         result = await compressVideo(selectedFile);
+        progressBar.style.width = '100%';
       } else if (fileType === 'audio') {
         progressBar.style.width = '30%';
         infoHTML += '<p style="color: #ffff00;">[COMPRESSING_AUDIO...]</p>';
         document.getElementById('fileInfo').innerHTML = infoHTML;
         result = await compressAudio(selectedFile);
+        progressBar.style.width = '100%';
       } else {
         result = {
           file: selectedFile,
@@ -622,16 +626,20 @@ async function handleFileSelect(e) {
           compressedSize: selectedFile.size,
           compressionRatio: 0
         };
-      }
-      progressBar.style.width = '100%';
-      if (result.compressedSize < result.originalSize) {
-        compressedFile = result.file;
-      } else {
-        result.compressedSize = result.originalSize;
-        result.compressionRatio = 0;
-        result.note = 'Compressed file was larger; using original.';
+        progressBar.style.width = '100%';
       }
       if (result) {
+        if (result.compressedSize < result.originalSize) {
+          compressedFile = result.file;
+        } else {
+          result = {
+            file: selectedFile,
+            originalSize: selectedFile.size,
+            compressedSize: selectedFile.size,
+            compressionRatio: 0,
+            note: 'Compressed file was larger; using original.'
+          };
+        }
         infoHTML = `
           <p><strong>${selectedFile.name}</strong></p>
           <small>TYPE: ${fileType.toUpperCase()}</small>
@@ -643,7 +651,7 @@ async function handleFileSelect(e) {
             <p>COMPRESSED_SIZE: ${(result.compressedSize / 1024 / 1024).toFixed(2)}MB</p>
             <p style="color: #00ffff;">SPACE_SAVED: ${result.compressionRatio}%</p>
             ${result.compressedSize < result.originalSize ? `<p style="color: #00ff00;">✓ COMPRESSION_SUCCESSFUL</p>` : `<p style="color: #ffaa00;">⚠ FILE_ALREADY_OPTIMIZED</p>`}
-            ${result.note ? `<p style="color: #ffaa00;">${result.note}</p>` : ''}
+            ${result.note ? `<p>${result.note}</p>` : ''}
           </div>
         `;
       }
