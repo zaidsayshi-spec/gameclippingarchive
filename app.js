@@ -11,6 +11,16 @@ const COMPRESSION_CONFIG = {
     quality: 0.82,
     targetSizeMB: Infinity, // No size limit
     minQuality: 0.6 // Minimum quality threshold
+  },
+  video: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    targetBitrate: 2500000,
+    targetSizeMB: Infinity
+  },
+  audio: {
+    targetBitrate: 128000,
+    targetSizeMB: Infinity
   }
 };
 
@@ -195,6 +205,166 @@ async function compressImage(file, config = COMPRESSION_CONFIG.image) {
     };
     reader.onerror = () => reject(new Error('File reading failed'));
   });
+}
+
+// Video Compression using native browser APIs (MediaRecorder + Canvas for resizing)
+async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
+  try {
+    console.log('[Starting video compression...]');
+    const url = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.src = url;
+    video.style.display = 'none';
+    document.body.appendChild(video);
+    await new Promise((resolve, reject) => {
+      video.onloadedmetadata = resolve;
+      video.onerror = reject;
+    });
+    let width = video.videoWidth;
+    let height = video.videoHeight;
+    const ratio = Math.min(config.maxWidth / width, config.maxHeight / height, 1);
+    width = Math.floor(width * ratio);
+    height = Math.floor(height * ratio);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.style.display = 'none';
+    document.body.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+    const canvasStream = canvas.captureStream(30); // Approximate FPS
+    const audioStream = video.captureStream();
+    const audioTrack = audioStream.getAudioTracks()[0];
+    const combinedStream = new MediaStream();
+    combinedStream.addTrack(canvasStream.getVideoTracks()[0]);
+    if (audioTrack) combinedStream.addTrack(audioTrack);
+    const options = {
+      mimeType: 'video/webm;codecs=vp8,opus',
+      videoBitsPerSecond: config.targetBitrate,
+      audioBitsPerSecond: 128000
+    };
+    const mediaRecorder = new MediaRecorder(combinedStream, options);
+    const chunks = [];
+    mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+    const compressed = new Promise((resolve, reject) => {
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        resolve(blob);
+      };
+      mediaRecorder.onerror = reject;
+    });
+    mediaRecorder.start(100); // Collect data every 100ms
+    let drawing = false;
+    function draw() {
+      if (video.paused || video.ended || !drawing) return;
+      ctx.drawImage(video, 0, 0, width, height);
+      requestAnimationFrame(draw);
+    }
+    video.play().then(() => {
+      drawing = true;
+      draw();
+    });
+    // Update progress based on video playback
+    const progressBar = document.getElementById('compressionProgress');
+    video.ontimeupdate = () => {
+      if (video.duration > 0) {
+        const percent = (video.currentTime / video.duration) * 100;
+        progressBar.style.width = `${percent}%`;
+      }
+    };
+    video.onended = () => {
+      drawing = false;
+      mediaRecorder.stop();
+    };
+    const blob = await compressed;
+    const compressedFile = new File([blob], file.name.replace(/\.[^.]+$/, '_compressed.webm'), { type: 'video/webm' });
+    console.log(`[✓ Video compressed: ${(file.size/1024/1024).toFixed(2)}MB → ${(blob.size/1024/1024).toFixed(2)}MB]`);
+    document.body.removeChild(video);
+    document.body.removeChild(canvas);
+    URL.revokeObjectURL(url);
+    return {
+      file: compressedFile,
+      originalSize: file.size,
+      compressedSize: blob.size,
+      compressionRatio: ((1 - blob.size / file.size) * 100).toFixed(1),
+      dimensions: `${width}x${height}`,
+      originalDimensions: `${video.videoWidth}x${video.videoHeight}`
+    };
+  } catch (error) {
+    console.error('[✗ Video compression error:]', error);
+    return {
+      file: file,
+      originalSize: file.size,
+      compressedSize: file.size,
+      compressionRatio: 0,
+      error: true,
+      note: `Video compression failed: ${error.message}. Uploading original.`
+    };
+  }
+}
+
+// Audio Compression using native browser APIs (MediaRecorder)
+async function compressAudio(file, config = COMPRESSION_CONFIG.audio) {
+  try {
+    console.log('[Starting audio compression...]');
+    const url = URL.createObjectURL(file);
+    const audio = document.createElement('audio');
+    audio.src = url;
+    audio.style.display = 'none';
+    document.body.appendChild(audio);
+    await new Promise((resolve, reject) => {
+      audio.onloadedmetadata = resolve;
+      audio.onerror = reject;
+    });
+    const audioStream = audio.captureStream();
+    const options = {
+      mimeType: 'audio/webm;codecs=opus',
+      audioBitsPerSecond: config.targetBitrate
+    };
+    const mediaRecorder = new MediaRecorder(audioStream, options);
+    const chunks = [];
+    mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+    const compressed = new Promise((resolve, reject) => {
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        resolve(blob);
+      };
+      mediaRecorder.onerror = reject;
+    });
+    mediaRecorder.start(100); // Collect data every 100ms
+    // Update progress based on audio playback
+    const progressBar = document.getElementById('compressionProgress');
+    audio.ontimeupdate = () => {
+      if (audio.duration > 0) {
+        const percent = (audio.currentTime / audio.duration) * 100;
+        progressBar.style.width = `${percent}%`;
+      }
+    };
+    audio.play();
+    audio.onended = () => {
+      mediaRecorder.stop();
+    };
+    const blob = await compressed;
+    const compressedFile = new File([blob], file.name.replace(/\.[^.]+$/, '_compressed.webm'), { type: 'audio/webm' });
+    console.log(`[✓ Audio compressed: ${(file.size/1024/1024).toFixed(2)}MB → ${(blob.size/1024/1024).toFixed(2)}MB]`);
+    document.body.removeChild(audio);
+    URL.revokeObjectURL(url);
+    return {
+      file: compressedFile,
+      originalSize: file.size,
+      compressedSize: blob.size,
+      compressionRatio: ((1 - blob.size / file.size) * 100).toFixed(1)
+    };
+  } catch (error) {
+    console.error('[✗ Audio compression error:]', error);
+    return {
+      file: file,
+      originalSize: file.size,
+      compressedSize: file.size,
+      compressionRatio: 0,
+      error: true,
+      note: `Audio compression failed: ${error.message}. Uploading original.`
+    };
+  }
 }
 
 // Auth
@@ -428,8 +598,21 @@ async function handleFileSelect(e) {
         result = await compressImage(selectedFile);
         compressedFile = result.file;
         progressBar.style.width = '100%';
+      } else if (fileType === 'video') {
+        progressBar.style.width = '30%';
+        infoHTML += '<p style="color: #ffff00;">[COMPRESSING_VIDEO...]</p>';
+        document.getElementById('fileInfo').innerHTML = infoHTML;
+        result = await compressVideo(selectedFile);
+        compressedFile = result.file;
+        progressBar.style.width = '100%';
+      } else if (fileType === 'audio') {
+        progressBar.style.width = '30%';
+        infoHTML += '<p style="color: #ffff00;">[COMPRESSING_AUDIO...]</p>';
+        document.getElementById('fileInfo').innerHTML = infoHTML;
+        result = await compressAudio(selectedFile);
+        compressedFile = result.file;
+        progressBar.style.width = '100%';
       } else {
-        // For video and audio, no compression
         result = {
           file: selectedFile,
           originalSize: selectedFile.size,
@@ -443,13 +626,13 @@ async function handleFileSelect(e) {
           <p><strong>${selectedFile.name}</strong></p>
           <small>TYPE: ${fileType.toUpperCase()}</small>
           <div class="compression-info">
-            <p>[PROCESSING_COMPLETE]</p>
+            <p>[COMPRESSION_COMPLETE]</p>
             ${result.originalDimensions ? `<p>ORIGINAL_DIM: ${result.originalDimensions}</p>` : ''}
             ${result.dimensions ? `<p>COMPRESSED_DIM: ${result.dimensions}</p>` : ''}
             <p>ORIGINAL_SIZE: ${(result.originalSize / 1024 / 1024).toFixed(2)}MB</p>
             <p>COMPRESSED_SIZE: ${(result.compressedSize / 1024 / 1024).toFixed(2)}MB</p>
             <p style="color: #00ffff;">SPACE_SAVED: ${result.compressionRatio}%</p>
-            ${result.compressedSize < result.originalSize ? `<p style="color: #00ff00;">✓ COMPRESSION_SUCCESSFUL</p>` : `<p style="color: #ffaa00;">⚠ NO_COMPRESSION_APPLIED</p>`}
+            ${result.compressedSize < result.originalSize ? `<p style="color: #00ff00;">✓ COMPRESSION_SUCCESSFUL</p>` : `<p style="color: #ffaa00;">⚠ FILE_ALREADY_OPTIMIZED OR NO_COMPRESSION_APPLIED</p>`}
           </div>
         `;
       }
@@ -513,6 +696,8 @@ async function handleUpload(e) {
     if (compressedFile) {
       if (fileType === 'image') {
         finalExt = 'jpg';
+      } else if (fileType === 'video' || fileType === 'audio') {
+        finalExt = 'webm';
       }
     }
     const fileName = `${timestamp}-${randomStr}.${finalExt}`;
