@@ -224,59 +224,143 @@ async function compressImage(file, config = COMPRESSION_CONFIG.image) {
     });
 }
 
-// Video Compression using Canvas (extract frame + metadata)
+// Video Compression using FFmpeg.wasm
 async function compressVideo(file, config = COMPRESSION_CONFIG.video) {
-    return new Promise((resolve, reject) => {
-        const video = document.createElement('video');
-        video.preload = 'metadata';
-        video.muted = true;
+    try {
+        // Load FFmpeg
+        if (!window.FFmpeg) {
+            throw new Error('FFmpeg not loaded');
+        }
         
-        video.onloadedmetadata = () => {
-            const duration = video.duration;
-            const estimatedBitrate = (file.size * 8) / duration;
-            
-            // For videos, we don't compress on client side
-            // Just return original file with metadata
-            resolve({
-                file: file,
-                originalSize: file.size,
-                compressedSize: file.size,
-                compressionRatio: 0,
-                note: 'Video uploaded as original. Client-side video compression not supported.',
-                duration: duration.toFixed(1) + 's',
-                estimatedBitrate: (estimatedBitrate / 1000000).toFixed(2) + ' Mbps'
-            });
-            
-            URL.revokeObjectURL(video.src);
+        const { createFFmpeg, fetchFile } = window.FFmpeg;
+        const ffmpeg = createFFmpeg({ 
+            log: false,
+            corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
+        });
+        
+        if (!ffmpeg.isLoaded()) {
+            await ffmpeg.load();
+        }
+        
+        const inputName = 'input' + file.name.substring(file.name.lastIndexOf('.'));
+        const outputName = 'output.mp4';
+        
+        // Write input file
+        ffmpeg.FS('writeFile', inputName, await fetchFile(file));
+        
+        // Compress video with good quality settings
+        // -crf 28 = good quality/size balance (lower = better quality, 18-28 recommended)
+        // -preset fast = encoding speed
+        // -vf scale for resolution limiting
+        await ffmpeg.run(
+            '-i', inputName,
+            '-c:v', 'libx264',
+            '-crf', '28',
+            '-preset', 'fast',
+            '-vf', `scale='min(${config.maxWidth},iw)':'min(${config.maxHeight},ih)':force_original_aspect_ratio=decrease`,
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-movflags', '+faststart',
+            outputName
+        );
+        
+        // Read compressed file
+        const data = ffmpeg.FS('readFile', outputName);
+        const compressedBlob = new Blob([data.buffer], { type: 'video/mp4' });
+        const compressedFile = new File(
+            [compressedBlob],
+            file.name.replace(/\.[^.]+$/, '_compressed.mp4'),
+            { type: 'video/mp4', lastModified: Date.now() }
+        );
+        
+        // Clean up
+        ffmpeg.FS('unlink', inputName);
+        ffmpeg.FS('unlink', outputName);
+        
+        return {
+            file: compressedFile,
+            originalSize: file.size,
+            compressedSize: compressedBlob.size,
+            compressionRatio: ((1 - compressedBlob.size / file.size) * 100).toFixed(1)
         };
         
-        video.onerror = () => {
-            URL.revokeObjectURL(video.src);
-            // If video can't be loaded, still upload it
-            resolve({
-                file: file,
-                originalSize: file.size,
-                compressedSize: file.size,
-                compressionRatio: 0,
-                note: 'Video will be uploaded as-is.'
-            });
-        };
-        
-        video.src = URL.createObjectURL(file);
-    });
-}
-
-// Audio Compression (metadata only - real compression requires server processing)
-async function compressAudio(file, config = COMPRESSION_CONFIG.audio) {
-    return new Promise((resolve) => {
-        resolve({
+    } catch (error) {
+        console.error('Video compression error:', error);
+        // Fallback: return original file
+        return {
             file: file,
             originalSize: file.size,
             compressedSize: file.size,
             compressionRatio: 0,
-            note: 'Audio files uploaded as-is. Consider converting to MP3 128kbps for smaller size.'
+            note: 'Video compression unavailable - uploaded as original'
+        };
+    }
+}
+
+// Audio Compression using FFmpeg.wasm
+async function compressAudio(file, config = COMPRESSION_CONFIG.audio) {
+    try {
+        // Load FFmpeg
+        if (!window.FFmpeg) {
+            throw new Error('FFmpeg not loaded');
+        }
+        
+        const { createFFmpeg, fetchFile } = window.FFmpeg;
+        const ffmpeg = createFFmpeg({ 
+            log: false,
+            corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
         });
-    });
+        
+        if (!ffmpeg.isLoaded()) {
+            await ffmpeg.load();
+        }
+        
+        const inputName = 'input' + file.name.substring(file.name.lastIndexOf('.'));
+        const outputName = 'output.mp3';
+        
+        // Write input file
+        ffmpeg.FS('writeFile', inputName, await fetchFile(file));
+        
+        // Compress audio to MP3 128kbps
+        await ffmpeg.run(
+            '-i', inputName,
+            '-c:a', 'libmp3lame',
+            '-b:a', '128k',
+            '-ar', '44100',
+            outputName
+        );
+        
+        // Read compressed file
+        const data = ffmpeg.FS('readFile', outputName);
+        const compressedBlob = new Blob([data.buffer], { type: 'audio/mpeg' });
+        const compressedFile = new File(
+            [compressedBlob],
+            file.name.replace(/\.[^.]+$/, '_compressed.mp3'),
+            { type: 'audio/mpeg', lastModified: Date.now() }
+        );
+        
+        // Clean up
+        ffmpeg.FS('unlink', inputName);
+        ffmpeg.FS('unlink', outputName);
+        
+        return {
+            file: compressedFile,
+            originalSize: file.size,
+            compressedSize: compressedBlob.size,
+            compressionRatio: ((1 - compressedBlob.size / file.size) * 100).toFixed(1)
+        };
+        
+    } catch (error) {
+        console.error('Audio compression error:', error);
+        // Fallback: return original file
+        return {
+            file: file,
+            originalSize: file.size,
+            compressedSize: file.size,
+            compressionRatio: 0,
+            note: 'Audio compression unavailable - uploaded as original'
+        };
+    }
 }
 
 // Auth
@@ -643,18 +727,35 @@ async function handleUpload(e) {
     try {
         // Use compressed/optimized file if available
         const fileToUpload = compressedFile || selectedFile;
-        const fileExt = fileToUpload.name.split('.').pop();
-        const fileName = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}.${fileExt}`;
         
-        // Upload file
+        // Generate safe filename with proper extension
+        const timestamp = Date.now();
+        const randomStr = Math.random().toString(36).substr(2, 9);
+        const originalExt = selectedFile.name.split('.').pop().toLowerCase();
+        
+        // For compressed images, use .jpg extension, otherwise keep original
+        let finalExt = originalExt;
+        if (compressedFile && detectFileType(selectedFile) === 'image') {
+            finalExt = 'jpg';
+        }
+        
+        const fileName = `${timestamp}-${randomStr}.${finalExt}`;
+        
+        console.log('Uploading file:', fileName, 'Size:', fileToUpload.size, 'Type:', fileToUpload.type);
+        
+        // Upload file with correct content type
         const { data: uploadData, error: uploadError } = await supabase.storage
             .from('files')
             .upload(fileName, fileToUpload, {
                 cacheControl: '3600',
-                upsert: false
+                upsert: false,
+                contentType: fileToUpload.type
             });
         
-        if (uploadError) throw uploadError;
+        if (uploadError) {
+            console.error('Upload error details:', uploadError);
+            throw uploadError;
+        }
         
         progressFill.style.width = '90%';
         progressText.textContent = '[UPLOADING...] 90%';
